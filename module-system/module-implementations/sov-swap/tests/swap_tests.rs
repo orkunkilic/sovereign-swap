@@ -1,0 +1,176 @@
+use std::borrow::Borrow;
+
+use sov_bank::create_token_address;
+use sov_modules_api::default_signature::private_key;
+use sov_swap::call::CallMessage;
+use sov_swap::{SwapModule, SwapModuleConfig};
+use sov_modules_api::default_context::DefaultContext;
+use sov_modules_api::{Address, Context, Hasher, Module, ModuleInfo, Spec};
+use sov_rollup_interface::stf::Event;
+use sov_state::{DefaultStorageSpec, ProverStorage, WorkingSet};
+
+pub type C = DefaultContext;
+pub type Storage = ProverStorage<DefaultStorageSpec>;
+
+pub fn generate_address(key: &str) -> <C as Spec>::Address {
+    let hash = <C as Spec>::Hasher::hash(key.as_bytes());
+    Address::from(hash)
+}
+
+#[test]
+fn create_pool() {
+    // Preparation
+    let token_a = generate_address("token_a");
+    let token_b = generate_address("token_b");
+    let config: SwapModuleConfig<C> = SwapModuleConfig {
+        pools: vec![],
+    };
+    let mut working_set = WorkingSet::new(ProverStorage::temporary());
+    let swap = SwapModule::new();
+
+    // Genesis
+    let genesis_result = swap.genesis(&config, &mut working_set);
+    assert!(genesis_result.is_ok());
+
+    // Create Pool
+    let create_pool_message = CallMessage::<C>::CreatePool {
+        token_a: token_a.clone(),
+        token_b: token_b.clone(),
+    };
+
+    let create_pool_result = swap.call(
+        create_pool_message.clone(),
+        &C::new(token_a.clone()),
+        &mut working_set,
+    );
+
+    assert!(create_pool_result.is_ok());
+
+    let pool_id = generate_address(&format!("{:?}{:?}", token_a, token_b));
+
+    assert_eq!(
+        working_set.events()[0],
+        Event::new("create_pool", &format!("pool_id: {pool_id:?}"))
+    );
+
+
+    // Attempt to create pool with the same tokens
+    let create_pool_result = swap.call(
+        create_pool_message.clone(),
+        &C::new(token_a.clone()),
+        &mut working_set,
+    );
+
+    assert!(create_pool_result.is_err());
+    let error_message = create_pool_result.err().unwrap().to_string();
+    assert_eq!("Pool already exists", error_message);
+}
+
+#[test]
+fn add_liquidity() {
+    // Preparation
+    let bank = sov_bank::Bank::<C>::new();
+    let config: SwapModuleConfig<C> = SwapModuleConfig {
+        pools: vec![],
+    };
+    let mut working_set = WorkingSet::new(ProverStorage::temporary());
+
+    let swap = SwapModule::new();
+
+    // create private key
+    let private_key = private_key::DefaultPrivateKey::generate();
+
+    // create tokens
+    let create_token_a_message = sov_bank::call::CallMessage::CreateToken {
+        salt: 0,
+        token_name: "TokenA".to_owned(),
+        initial_balance: 100,
+        minter_address: private_key.default_address(),
+        authorized_minters: vec![private_key.default_address()],
+    };
+    let token_a_response = bank.call(
+        create_token_a_message.clone(),
+        &C::new(private_key.default_address()),
+        &mut working_set,
+    );
+    assert!(token_a_response.is_ok());
+    // generate token address
+    let token_a_address = create_token_address::<C>(
+        &"TokenA".to_owned(),
+        private_key.default_address().as_ref(),
+        0,
+    );
+    
+    let create_token_b_message = sov_bank::call::CallMessage::CreateToken {
+        salt: 0,
+        token_name: "TokenB".to_owned(),
+        initial_balance: 100,
+        minter_address: private_key.default_address(),
+        authorized_minters: vec![private_key.default_address()],
+    };
+    let token_b_response = bank.call(
+        create_token_b_message.clone(),
+        &C::new(private_key.default_address()),
+        &mut working_set,
+    );
+    assert!(token_b_response.is_ok());
+    // generate token address
+    let token_b_address = create_token_address::<C>(
+        &"TokenB".to_owned(),
+        private_key.default_address().as_ref(),
+        0,
+    );
+
+    // log addresses
+    println!("token_a_address: {:?}", token_a_address);
+    println!("token_b_address: {:?}", token_b_address);
+
+    // Genesis
+    let genesis_result = swap.genesis(&config, &mut working_set);
+    assert!(genesis_result.is_ok());
+
+    // Create Pool
+    let create_pool_message = CallMessage::<C>::CreatePool {
+        token_a: token_a_address.clone(),
+        token_b: token_b_address.clone(),
+    };
+
+    let create_pool_result = swap.call(
+        create_pool_message.clone(),
+        &C::new(token_a_address.clone()),
+        &mut working_set,
+    );
+
+    assert!(create_pool_result.is_ok());
+
+    let pool_id = generate_address(&format!("{:?}{:?}", token_a_address, token_b_address));
+
+    assert_eq!(
+        working_set.events()[0],
+        Event::new("create_pool", &format!("pool_id: {pool_id:?}"))
+    );
+
+    // Add liquidity
+    let add_liquidity_message = CallMessage::<C>::AddLiquidity {
+        pool_id: pool_id.clone(),
+        token_a_amount: 100,
+        token_b_amount: 100,
+    };
+
+    let add_liquidity_result = swap.call(
+        add_liquidity_message.clone(),
+        &C::new(token_a_address.clone()),
+        &mut working_set,
+    );
+
+    // print error
+    if add_liquidity_result.is_err() {
+        println!("add_liquidity_result: {:?}", add_liquidity_result.err().unwrap().to_string());
+    }
+
+
+    assert_eq!(
+        working_set.events()[1],
+        Event::new("add_liquidity", &format!("pool_id: {pool_id:?}"))
+    );
+}
