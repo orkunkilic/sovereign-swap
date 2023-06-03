@@ -13,9 +13,12 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Clone)]
 pub struct Pool<C: Context> {
     pub token_a: C::Address,
-    pub token_b: C::Address,
     pub token_a_liquidity: u64,
+    
+    pub token_b: C::Address,
     pub token_b_liquidity: u64,
+
+    pub liquidity_token: C::Address,
 }
 
 pub struct SwapModuleConfig<C: Context> {

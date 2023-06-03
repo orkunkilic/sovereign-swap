@@ -1,4 +1,5 @@
 use anyhow::{Result, Error};
+use sov_bank::create_token_address;
 use sov_modules_api::{CallResponse, Address};
 use sov_state::WorkingSet;
 use std::fmt::Debug;
@@ -66,14 +67,41 @@ impl<C: Context> SwapModule<C> {
             bail!("Pool already exists");
         }
 
+        // create token
+        let create_token_message = sov_bank::call::CallMessage::<C>::CreateToken {
+            salt: 0,
+            token_name: format!("LP:{}_{}", token_a, token_b),
+            initial_balance: 0,
+            minter_address: self.address.clone(),
+            authorized_minters: vec![self.address.clone()],
+        };
+        let create_token_result = sov_modules_api::Module::call(&self._bank, create_token_message, _context, working_set);
+        if create_token_result.is_err() {
+            bail!("Create token failed");
+        }
+
+        // generate token address
+        let token_address = create_token_address::<C>(
+            &format!("LP:{}_{}", &token_a, &token_b),
+            self.address.clone().as_ref(),
+            0,
+        );
+
         let pool = Pool {
-            token_a,
-            token_b,
+            token_a: token_a.clone(),
+            token_b: token_b.clone(),
             token_a_liquidity: 0,
             token_b_liquidity: 0,
+            liquidity_token: token_address.clone(),
         };
         self.pools.set(&pool_id, &pool, working_set);
-        working_set.add_event("create_pool", &format!("pool_id: {pool_id:?}"));
+        working_set.add_event("create_pool", &format!(
+            "pool_id: {pool_id:?}, token_a: {token_a:?}, token_b: {token_b:?}, liquidity_token: {liquidity_token:?}",
+            pool_id = pool_id,
+            token_a = token_a,
+            token_b = token_b,
+            liquidity_token = token_address,
+        ));
 
         Ok(CallResponse::default())
     }
@@ -89,10 +117,6 @@ impl<C: Context> SwapModule<C> {
     ) -> Result<sov_modules_api::CallResponse> {
         // check if pool exists
         let mut pool = self.pools.get_or_err(&pool_id, working_set)?;
-
-        // log token addresses
-        println!("token_a: {:?}", pool.token_a);
-        println!("token_b: {:?}", pool.token_b);
 
         let transfer_a = self._bank.transfer_from(
             // from
@@ -121,13 +145,6 @@ impl<C: Context> SwapModule<C> {
 
         // check if transfers were successful
         if transfer_a.is_err() || transfer_b.is_err() {
-            // log errors
-            if transfer_a.is_err() {
-                println!("Transfer failed: {:?}", transfer_a.err().unwrap());
-            }
-            if transfer_b.is_err() {
-                println!("Transfer failed: {:?}", transfer_b.err().unwrap());
-            }
             bail!("Transfer failed");
         }
 
@@ -140,8 +157,8 @@ impl<C: Context> SwapModule<C> {
                 &pool.clone(),
                 working_set,
             );
-            working_set.add_event("add_liquidity", &format!("pool_id: {pool_id:?}"));
-            return Ok(CallResponse::default());
+
+            // TODO: calculate liquidity token to mint
         } else {
             // calculate liquidity to add
             let token_a_liquidity = token_a_amount * pool.token_a_liquidity / pool.token_a_liquidity;
@@ -150,6 +167,8 @@ impl<C: Context> SwapModule<C> {
             // update pool
             pool.token_a_liquidity += token_a_liquidity;
             pool.token_b_liquidity += token_b_liquidity;
+
+            // TODO: calculate liquidity token to mint
         }
 
         // update pool
@@ -180,7 +199,142 @@ impl<C: Context> SwapModule<C> {
         _context: &C,
         working_set: &mut WorkingSet<C::Storage>,
     ) -> Result<sov_modules_api::CallResponse> {
-        // TODO
+        
+        // check if pool exists
+        let mut pool = self.pools.get_or_err(&pool_id, working_set)?;
+
+
+        // only send one token
+        if token_a_amount > 0 && token_b_amount > 0 {
+            bail!("Can only send one token");
+        }
+
+        // check if pool has liquidity
+        if pool.token_a_liquidity == 0 || pool.token_b_liquidity == 0 {
+            bail!("Pool has no liquidity");
+        }
+
+        // check if pool has enough liquidity
+        if pool.token_a_liquidity < token_a_amount || pool.token_b_liquidity < token_b_amount {
+            bail!("Pool does not have enough liquidity");
+        }
+
+        let mut a_to_send = 0;
+        let mut b_to_send = 0;
+
+        // if sending a, calculate b to send. Increase liquidity of a, decrease liquidity of b
+        if token_a_amount > 0 {
+            b_to_send = token_a_amount * pool.token_b_liquidity / pool.token_a_liquidity;
+            pool.token_a_liquidity += token_a_amount;
+            pool.token_b_liquidity -= b_to_send;
+
+            // transfer tokens
+            let transfer = self._bank.transfer_from(
+                // from
+                &self.address,
+                // to (this)
+                _context.sender(),
+                // coin
+                sov_bank::Coins {
+                    token_address: pool.token_b.clone(),
+                    amount: b_to_send,
+                },
+                working_set,
+            );
+
+            // check if transfer was successful
+            if transfer.is_err() {
+                bail!("Transfer failed");
+            }
+
+            // receive tokens
+            let transfer = self._bank.transfer_from(
+                // from
+                _context.sender(),
+                // to (this)
+                &self.address,
+                // coin
+                sov_bank::Coins {
+                    token_address: pool.token_a.clone(),
+                    amount: token_a_amount,
+                },
+                working_set,
+            );
+
+            // check if transfer was successful
+            if transfer.is_err() {
+                bail!("Transfer failed");
+            }
+        } else {
+            // if sending b, calculate a to send. Increase liquidity of b, decrease liquidity of a
+            a_to_send = token_b_amount * pool.token_a_liquidity / pool.token_b_liquidity;
+            pool.token_b_liquidity += token_b_amount;
+            pool.token_a_liquidity -= a_to_send;
+
+            // transfer tokens
+            let transfer = self._bank.transfer_from(
+                // from
+                &self.address,
+                // to (this)
+                _context.sender(),
+                // coin
+                sov_bank::Coins {
+                    token_address: pool.token_a.clone(),
+                    amount: a_to_send,
+                },
+                working_set,
+            );
+
+            // check if transfer was successful
+            if transfer.is_err() {
+                bail!("Transfer failed");
+            }
+
+            // receive tokens
+            let transfer = self._bank.transfer_from(
+                // from
+                _context.sender(),
+                // to (this)
+                &self.address,
+                // coin
+                sov_bank::Coins {
+                    token_address: pool.token_b.clone(),
+                    amount: token_b_amount,
+                },
+                working_set,
+            );
+
+            // check if transfer was successful
+            if transfer.is_err() {
+                bail!("Transfer failed");
+            }
+        }
+
+        // update pool
+        self.pools.set(&pool_id, &pool, working_set);
+
+        // log amounts
+        println!("token_a_amount: {:?}", token_a_amount);
+        println!("token_b_amount: {:?}", token_b_amount);
+        println!("a_to_send: {:?}", a_to_send);
+        println!("b_to_send: {:?}", b_to_send);
+
+
+        // emit event with pool_id, sender, send_token, send_amount, receive_token, receive_amount
+        let sender = _context.sender();
+        working_set.add_event(
+            "swap",
+            &format!(
+                "pool_id: {pool_id:?}, sender: {sender}, send_token: {send_token:?}, send_amount: {send_amount:?}, receive_token: {receive_token:?}, receive_amount: {receive_amount:?}",
+                pool_id = pool_id,
+                sender = sender,
+                send_token = if token_a_amount > 0 { pool.token_a.clone() } else { pool.token_b.clone() },
+                send_amount = if token_a_amount > 0 { token_a_amount } else { token_b_amount },
+                receive_token = if token_a_amount > 0 { pool.token_b.clone() } else { pool.token_a.clone() },
+                receive_amount = if token_a_amount > 0 { b_to_send } else { a_to_send },
+            ),
+        );
+
         Ok(CallResponse::default())
     }
 }
