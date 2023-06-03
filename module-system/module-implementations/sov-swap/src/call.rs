@@ -1,6 +1,6 @@
 use anyhow::{Result, Error};
 use sov_bank::create_token_address;
-use sov_modules_api::{CallResponse, Address};
+use sov_modules_api::{CallResponse, Address, Module};
 use sov_state::WorkingSet;
 use std::fmt::Debug;
 use thiserror::Error;
@@ -75,17 +75,26 @@ impl<C: Context> SwapModule<C> {
             minter_address: self.address.clone(),
             authorized_minters: vec![self.address.clone()],
         };
-        let create_token_result = sov_modules_api::Module::call(&self._bank, create_token_message, _context, working_set);
+        let create_token_result = sov_modules_api::Module::call(&self._bank, create_token_message, &C::new(self.address.clone()), working_set);
         if create_token_result.is_err() {
             bail!("Create token failed");
         }
 
+        
         // generate token address
         let token_address = create_token_address::<C>(
             &format!("LP:{}_{}", &token_a, &token_b),
             self.address.clone().as_ref(),
             0,
         );
+        
+        // get total supply to check if token was created
+        let total_supply = self._bank.supply_of(token_address.clone(), working_set);
+        if total_supply.amount.is_none() {
+            bail!("Token was not created");
+        } else {
+            println!("total_supply: {:?}", total_supply.amount.unwrap());
+        }
 
         let pool = Pool {
             token_a: token_a.clone(),
@@ -158,17 +167,59 @@ impl<C: Context> SwapModule<C> {
                 working_set,
             );
 
-            // TODO: calculate liquidity token to mint
+            // Initial amount is geometric mean of token amounts
+            let liquidity_token_amount = ((token_a_amount * token_b_amount) as f64).sqrt() as u64;
+
+            // log amounts
+            println!("liquidity_token_amount: {:?}", liquidity_token_amount);
+            println!("liquidity_token-address: {:?}", pool.liquidity_token.clone());
+
+            // mint liquidity token
+            let mint_message = sov_bank::call::CallMessage::<C>::Mint {
+                coins: sov_bank::Coins {
+                    token_address: pool.liquidity_token.clone(),
+                    amount: liquidity_token_amount,
+                },
+                minter_address: _context.sender().clone(),
+            };
+            let mint_result = sov_modules_api::Module::call(
+                &self._bank,
+                mint_message,
+                // context of this
+                &C::new(self.address.clone()),
+                working_set);
+            if mint_result.is_err() {
+                let error = mint_result.err().unwrap();
+                bail!("Mint failed: {:?}", error);
+            }
         } else {
             // calculate liquidity to add
             let token_a_liquidity = token_a_amount * pool.token_a_liquidity / pool.token_a_liquidity;
             let token_b_liquidity = token_b_amount * pool.token_b_liquidity / pool.token_b_liquidity;
 
+            // get liquidity token total supply
+            let liquidity_token_total_supply = self._bank.supply_of(pool.liquidity_token.clone(), working_set);
+            let liquidity_token_total_supply = liquidity_token_total_supply.amount.unwrap_or(0);
+
+            // Amount to mint is (Xdeposited / XStarting) * TotalSupply
+            let liquidity_token_amount = (token_a_amount / pool.token_a_liquidity) * liquidity_token_total_supply;
+
+            // mint liquidity token
+            let mint_message = sov_bank::call::CallMessage::<C>::Mint {
+                coins: sov_bank::Coins {
+                    token_address: pool.liquidity_token.clone(),
+                    amount: liquidity_token_amount,
+                },
+                minter_address: _context.sender().clone(),
+            };
+            let mint_result = sov_modules_api::Module::call(&self._bank, mint_message, _context, working_set);
+            if mint_result.is_err() {
+                bail!("Mint failed");
+            }
+
             // update pool
             pool.token_a_liquidity += token_a_liquidity;
             pool.token_b_liquidity += token_b_liquidity;
-
-            // TODO: calculate liquidity token to mint
         }
 
         // update pool

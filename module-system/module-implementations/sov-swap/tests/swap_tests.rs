@@ -150,16 +150,28 @@ fn add_liquidity() {
 
     let pool_id = generate_address(&format!("{:?}{:?}", token_a_address, token_b_address));
 
+    let liquidity_token = create_token_address::<C>(
+        &format!("LP:{}_{}", &token_a_address, &token_b_address),
+        swap.address().as_ref(),
+        0,
+    );
+
     assert_eq!(
         working_set.events()[0],
-        Event::new("create_pool", &format!("pool_id: {pool_id:?}"))
+        Event::new("create_pool", &format!(
+            "pool_id: {pool_id:?}, token_a: {token_a:?}, token_b: {token_b:?}, liquidity_token: {liquidity_token:?}",
+            pool_id = pool_id,
+            token_a = token_a_address,
+            token_b = token_b_address,
+            liquidity_token = liquidity_token,
+        ))
     );
 
     // Add liquidity
     let add_liquidity_message = CallMessage::<C>::AddLiquidity {
         pool_id: pool_id.clone(),
         token_a_amount: 100,
-        token_b_amount: 100,
+        token_b_amount: 50,
     };
 
     let add_liquidity_result = swap.call(
@@ -173,10 +185,22 @@ fn add_liquidity() {
         println!("add_liquidity_result: {:?}", add_liquidity_result.err().unwrap().to_string());
     }
 
-
     assert_eq!(
         working_set.events()[1],
         Event::new("add_liquidity", &format!("pool_id: {pool_id:?}"))
+    );
+
+    // get liquidity_token balance
+    let liquidity_token_balance = bank.balance_of(
+        private_key.default_address().clone(),
+        liquidity_token.clone(),
+        &mut working_set,
+    );
+    let liquidity_token_balance = liquidity_token_balance.amount.unwrap_or(0);
+
+    assert_eq!(
+        liquidity_token_balance,
+        ((100 * 50) as f64).sqrt() as u64
     );
 }
 
