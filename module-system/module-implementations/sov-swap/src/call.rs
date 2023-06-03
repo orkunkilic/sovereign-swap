@@ -79,7 +79,6 @@ impl<C: Context> SwapModule<C> {
         if create_token_result.is_err() {
             bail!("Create token failed");
         }
-
         
         // generate token address
         let token_address = create_token_address::<C>(
@@ -87,14 +86,6 @@ impl<C: Context> SwapModule<C> {
             self.address.clone().as_ref(),
             0,
         );
-        
-        // get total supply to check if token was created
-        let total_supply = self._bank.supply_of(token_address.clone(), working_set);
-        if total_supply.amount.is_none() {
-            bail!("Token was not created");
-        } else {
-            println!("total_supply: {:?}", total_supply.amount.unwrap());
-        }
 
         let pool = Pool {
             token_a: token_a.clone(),
@@ -169,10 +160,6 @@ impl<C: Context> SwapModule<C> {
 
             // Initial amount is geometric mean of token amounts
             let liquidity_token_amount = ((token_a_amount * token_b_amount) as f64).sqrt() as u64;
-
-            // log amounts
-            println!("liquidity_token_amount: {:?}", liquidity_token_amount);
-            println!("liquidity_token-address: {:?}", pool.liquidity_token.clone());
 
             // mint liquidity token
             let mint_message = sov_bank::call::CallMessage::<C>::Mint {
